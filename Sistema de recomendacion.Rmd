@@ -451,18 +451,36 @@ item_recommendation_farma <- function(material_id,
     left_join(catalogo, by = "Material")
 }
 
-# Analizar 5 productos de categorías distintas
-# (IVA 0 = exento/med. esencial; IVA 16 y 19; fórmula médica SI/NO)
-productos_prueba <- farma %>%
-  group_by(Material, description, `formula medica`, IVA) %>%
-  summarise(total = sum(cantidad), .groups="drop") %>%
-  arrange(desc(total)) %>%
-  group_by(`formula medica`, IVA) %>%
-  slice(1) %>%
-  ungroup() %>%
-  head(5)
+# Analizar cinco productos con códigos y presentaciones diferentes
+# Se usan los mismos cinco casos del informe.
+# El IVA no se utiliza como categoría farmacéutica ni para repetir productos.
+productos_prueba <- tibble::tibble(
+  Material = c(
+    "300000012",
+    "300000057",
+    "300000089",
+    "300005269",
+    "300005439"
+  ),
+  presentacion = c(
+    "Cápsulas blandas",
+    "Solución oftálmica",
+    "Inyectable",
+    "Crema",
+    "Nutrición en sobres"
+  )
+) %>%
+  left_join(catalogo, by = "Material")
 
-print(productos_prueba[, c("Material","description","formula medica","IVA")])
+# Verificar que hay cinco productos distintos, descritos y presentes en el modelo
+stopifnot(
+  nrow(productos_prueba) == 5,
+  n_distinct(productos_prueba$Material) == 5,
+  !anyNA(productos_prueba$description),
+  all(productos_prueba$Material %in% rownames(sim_matrix))
+)
+
+print(productos_prueba, n = Inf)
 
 tabla_analisis <- list()
 for(i in 1:nrow(productos_prueba)) {
@@ -474,7 +492,15 @@ for(i in 1:nrow(productos_prueba)) {
   }
 }
 tabla_item_item <- bind_rows(tabla_analisis)
-print(tabla_item_item[, c("producto_consulta","description","similarity")])
+# Mostrar las 25 filas: cinco recomendaciones por cada producto consultado
+print(
+  tabla_item_item[, c(
+    "producto_consulta",
+    "description",
+    "similarity"
+  )],
+  n = Inf
+)
 ```
 
 ---

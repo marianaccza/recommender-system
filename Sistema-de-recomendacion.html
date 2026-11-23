@@ -835,26 +835,44 @@ item_recommendation_farma &lt;- function(material_id,
     left_join(catalogo, by = &quot;Material&quot;)
 }
 
-# Analizar 5 productos de categorías distintas
-# (IVA 0 = exento/med. esencial; IVA 16 y 19; fórmula médica SI/NO)
-productos_prueba &lt;- farma %&gt;%
-  group_by(Material, description, `formula medica`, IVA) %&gt;%
-  summarise(total = sum(cantidad), .groups=&quot;drop&quot;) %&gt;%
-  arrange(desc(total)) %&gt;%
-  group_by(`formula medica`, IVA) %&gt;%
-  slice(1) %&gt;%
-  ungroup() %&gt;%
-  head(5)
+# Analizar cinco productos con códigos y presentaciones diferentes
+# Se usan los mismos cinco casos del informe.
+# El IVA no se utiliza como categoría farmacéutica ni para repetir productos.
+productos_prueba &lt;- tibble::tibble(
+  Material = c(
+    &quot;300000012&quot;,
+    &quot;300000057&quot;,
+    &quot;300000089&quot;,
+    &quot;300005269&quot;,
+    &quot;300005439&quot;
+  ),
+  presentacion = c(
+    &quot;Cápsulas blandas&quot;,
+    &quot;Solución oftálmica&quot;,
+    &quot;Inyectable&quot;,
+    &quot;Crema&quot;,
+    &quot;Nutrición en sobres&quot;
+  )
+) %&gt;%
+  left_join(catalogo, by = &quot;Material&quot;)
 
-print(productos_prueba[, c(&quot;Material&quot;,&quot;description&quot;,&quot;formula medica&quot;,&quot;IVA&quot;)])</code></pre>
-<pre><code>## # A tibble: 5 × 4
-##   Material  description                              `formula medica`   IVA
-##   &lt;chr&gt;     &lt;chr&gt;                                    &lt;chr&gt;            &lt;dbl&gt;
-## 1 300000712 GINKGO BILOBA 40 mg CBG CJA x20 UND CIAL NO                   0
-## 2 300005439 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL NO                  16
-## 3 300005439 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL NO                  19
-## 4 300001313 ISOTRETINOINA 20mg CBG CJAx30 UND (TRIFL SI                   0
-## 5 300000049 ISOFACE 10 mg CBG CJAx30 UND CIAL (Alu)  SI                  16</code></pre>
+# Verificar que hay cinco productos distintos, descritos y presentes en el modelo
+stopifnot(
+  nrow(productos_prueba) == 5,
+  n_distinct(productos_prueba$Material) == 5,
+  !anyNA(productos_prueba$description),
+  all(productos_prueba$Material %in% rownames(sim_matrix))
+)
+
+print(productos_prueba, n = Inf)</code></pre>
+<pre><code>## # A tibble: 5 × 3
+##   Material  presentacion        description                             
+##   &lt;chr&gt;     &lt;chr&gt;               &lt;chr&gt;                                   
+## 1 300000012 Cápsulas blandas    B-VIT CBG CAJA x 50 UND CIAL            
+## 2 300000057 Solución oftálmica  LAGRIFRESH SOL. OFTAL. FCO x 15ml       
+## 3 300000089 Inyectable          B-VIT PLUS INY. CAJA x 6 AMPOLLAS       
+## 4 300005269 Crema               FUNGIBLAN CREMA TUBO COLAPSIBLEx 30 g   
+## 5 300005439 Nutrición en sobres NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL</code></pre>
 <pre class="r"><code>tabla_analisis &lt;- list()
 for(i in 1:nrow(productos_prueba)) {
   mid &lt;- productos_prueba$Material[i]
@@ -865,21 +883,43 @@ for(i in 1:nrow(productos_prueba)) {
   }
 }
 tabla_item_item &lt;- bind_rows(tabla_analisis)
-print(tabla_item_item[, c(&quot;producto_consulta&quot;,&quot;description&quot;,&quot;similarity&quot;)])</code></pre>
+# Mostrar las 25 filas: cinco recomendaciones por cada producto consultado
+print(
+  tabla_item_item[, c(
+    &quot;producto_consulta&quot;,
+    &quot;description&quot;,
+    &quot;similarity&quot;
+  )],
+  n = Inf
+)</code></pre>
 <pre><code>## # A tibble: 25 × 3
 ##    producto_consulta                        description               similarity
 ##    &lt;chr&gt;                                    &lt;chr&gt;                          &lt;dbl&gt;
-##  1 GINKGO BILOBA 40 mg CBG CJA x20 UND CIAL VITAMINA E 400 UI FCO x …      0.780
-##  2 GINKGO BILOBA 40 mg CBG CJA x20 UND CIAL VITAMINA E 1000 UI FCO x…      0.755
-##  3 GINKGO BILOBA 40 mg CBG CJA x20 UND CIAL NISTATINA+OXIDO DE ZINC …      0.716
-##  4 GINKGO BILOBA 40 mg CBG CJA x20 UND CIAL VITAMINA E 400 CBG CJA x…      0.704
-##  5 GINKGO BILOBA 40 mg CBG CJA x20 UND CIAL VITAMINA E 400 UI FCO x …      0.681
-##  6 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL NUTRIGEL 2.0 SABOR NTRO …      0.751
-##  7 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL NUTRIGEL ADVANCE MANDARI…      0.682
-##  8 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL VITAMINA E 400 UI FCO x …      0.675
-##  9 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL DICLOFEN AEROSOL FCO X 2…      0.661
-## 10 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL VITAMINA E 1000 UI FCO x…      0.660
-## # ℹ 15 more rows</code></pre>
+##  1 B-VIT CBG CAJA x 50 UND CIAL             GINKGO BILOBA 40 mg CBG …      0.628
+##  2 B-VIT CBG CAJA x 50 UND CIAL             VITAMINA E 400 UI FCO x …      0.620
+##  3 B-VIT CBG CAJA x 50 UND CIAL             NUTRIGEL 2.0 SABOR NRJA …      0.594
+##  4 B-VIT CBG CAJA x 50 UND CIAL             VITAMINA E 1000 UI FCO x…      0.593
+##  5 B-VIT CBG CAJA x 50 UND CIAL             GESTAVIT DHA CBG CAJA x …      0.570
+##  6 LAGRIFRESH SOL. OFTAL. FCO x 15ml        GINKGO BILOBA 40 mg CBG …      0.547
+##  7 LAGRIFRESH SOL. OFTAL. FCO x 15ml        TEARSOFT SOL OFT CJAx1 F…      0.535
+##  8 LAGRIFRESH SOL. OFTAL. FCO x 15ml        VITAMINA E 400 UI FCO x …      0.532
+##  9 LAGRIFRESH SOL. OFTAL. FCO x 15ml        VITAMINA E 1000 UI FCO x…      0.524
+## 10 LAGRIFRESH SOL. OFTAL. FCO x 15ml        NUTRIGEL 2.0 SABOR NRJA …      0.519
+## 11 B-VIT PLUS INY. CAJA x 6 AMPOLLAS        B-VIT INY.CJAx3 JERINGA …      0.477
+## 12 B-VIT PLUS INY. CAJA x 6 AMPOLLAS        VITAMINA E 1000 UI FCO x…      0.458
+## 13 B-VIT PLUS INY. CAJA x 6 AMPOLLAS        GINKGO BILOBA 40 mg CBG …      0.458
+## 14 B-VIT PLUS INY. CAJA x 6 AMPOLLAS        VITAMINA E 400 UI FCO x …      0.446
+## 15 B-VIT PLUS INY. CAJA x 6 AMPOLLAS        B-VIT CBG CAJA x 50 UND …      0.445
+## 16 FUNGIBLAN CREMA TUBO COLAPSIBLEx 30 g    OMEGEL CBG CJA x 10 UND …      0.396
+## 17 FUNGIBLAN CREMA TUBO COLAPSIBLEx 30 g    POLIVIT CBG CJA x 10 UND…      0.332
+## 18 FUNGIBLAN CREMA TUBO COLAPSIBLEx 30 g    TENIBLAN 30-200 CBG CJA …      0.317
+## 19 FUNGIBLAN CREMA TUBO COLAPSIBLEx 30 g    KETOBLAN 50 mg CBG CJAx …      0.299
+## 20 FUNGIBLAN CREMA TUBO COLAPSIBLEx 30 g    AMICAPS 20.8% EC VET. FC…      0.293
+## 21 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL NUTRIGEL 2.0 SABOR NTRO …      0.751
+## 22 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL NUTRIGEL ADVANCE MANDARI…      0.682
+## 23 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL VITAMINA E 400 UI FCO x …      0.675
+## 24 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL DICLOFEN AEROSOL FCO X 2…      0.661
+## 25 NUTRIGEL 2.0 SABOR NRJA CJAx30SOBRE CIAL VITAMINA E 1000 UI FCO x…      0.660</code></pre>
 <hr />
 </div>
 <div id="fase-6-recomendador-usuariousuario-procaps" class="section level1">
