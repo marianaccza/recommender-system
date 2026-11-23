@@ -568,29 +568,32 @@ for(k in c(5, 10, 20)) {
 
 # FASE 7 — Evaluación temporal contra línea base
 
+Esta evaluación usa **todos los compradores elegibles**, no una muestra aleatoria.
+Se entrena hasta el 31 de diciembre de 2020 y se reservan las compras de
+2021 a marzo de 2022. Para que la comparación sea justa, los tres métodos
+reciben los mismos compradores, deben excluir productos comprados durante
+entrenamiento y devuelven hasta diez recomendaciones. Se considera relevante
+solo un producto adquirido por primera vez en el período de prueba.
+
 ```{r fase7-particion}
-# Separar en train (hasta 2020) y test (2021-2022)
+# Partición temporal: las recomendaciones usan exclusivamente datos de train.
 farma_train <- farma %>% filter(fecha <= as.Date("2020-12-31"))
 farma_test  <- farma %>% filter(fecha >  as.Date("2020-12-31"))
 
-cat("Train: facturas hasta 2020 —", n_distinct(farma_train$colaborador),
-    "compradores\n")
-cat("Test: facturas 2021-2022 —",  n_distinct(farma_test$colaborador),
-    "compradores\n")
-
-# Compradores presentes en ambos periodos
 compradores_ambos <- intersect(
-  unique(farma_train$colaborador),
-  unique(farma_test$colaborador)
+  unique(farma_train$colaborador), unique(farma_test$colaborador)
 )
-cat("Compradores en ambos periodos:", length(compradores_ambos), "\n")
+
+cat("Compradores en train:", n_distinct(farma_train$colaborador), "\n")
+cat("Compradores en test:", n_distinct(farma_test$colaborador), "\n")
+cat("Compradores presentes en ambos periodos:", length(compradores_ambos), "\n")
 ```
 
 ```{r fase7-matriz-train}
-# Reconstruir preferencia y matriz solo con datos de entrenamiento
+# Reconstrucción sin filtración de información de test.
 pref_train <- farma_train %>%
   group_by(colaborador, Material) %>%
-  summarise(log_cantidad = log1p(sum(cantidad, na.rm=TRUE)), .groups="drop")
+  summarise(log_cantidad = log1p(sum(cantidad, na.rm = TRUE)), .groups = "drop")
 
 user_item_train <- pref_train %>%
   pivot_wider(names_from = Material, values_from = log_cantidad,
@@ -600,97 +603,220 @@ row.names(user_item_train) <- user_item_train$colaborador
 user_item_train$colaborador <- NULL
 user_item_train <- as.matrix(user_item_train)
 
-# Precalcular similitud producto-producto (solo con datos train)
-cat("Calculando sim_matrix_train...\n")
+# Similitud ítem–ítem, exclusivamente con las transacciones de train.
 mat_t_train <- t(user_item_train)
-n_p <- nrow(mat_t_train)
-sim_train <- matrix(0, n_p, n_p,
-                    dimnames = list(rownames(mat_t_train), rownames(mat_t_train)))
-for(i in 1:n_p) for(j in i:n_p) {
-  s <- cos_sim_farma(mat_t_train[i,], mat_t_train[j,])
-  sim_train[i,j] <- s; sim_train[j,i] <- s
-}
-cat("Listo.\n")
+normas_prod <- sqrt(rowSums(mat_t_train^2))
+mat_t_norm <- sweep(mat_t_train, 1, pmax(normas_prod, .Machine$double.eps), "/")
+sim_train <- tcrossprod(mat_t_norm)
+
+# Similitud usuario–usuario, con el mismo coseno definido en la FASE 4.
+normas_usuario <- sqrt(rowSums(user_item_train^2))
+user_item_train_norm <- sweep(
+  user_item_train, 1, pmax(normas_usuario, .Machine$double.eps), "/"
+)
+sim_usuarios_train <- tcrossprod(user_item_train_norm)
+
+cat("Matriz de productos:", nrow(sim_train), "x", ncol(sim_train), "\n")
+cat("Matriz de compradores:", nrow(sim_usuarios_train), "x",
+    ncol(sim_usuarios_train), "\n")
 ```
 
 ```{r fase7-baseline}
-# Línea base: los 10 productos más vendidos en train
-top10_baseline <- farma_train %>%
+# Importante: ordenar TODOS los productos de train por unidades vendidas.
+# La exclusión del historial se hace ANTES de seleccionar las diez posiciones
+# de cada comprador; así la línea base no deja huecos artificiales.
+ranking_popularidad <- farma_train %>%
   group_by(Material) %>%
-  summarise(total = sum(cantidad, na.rm=TRUE), .groups="drop") %>%
+  summarise(total = sum(cantidad, na.rm = TRUE), .groups = "drop") %>%
   arrange(desc(total)) %>%
-  head(10) %>%
   pull(Material)
-cat("Top 10 más vendidos (train):", top10_baseline, "\n")
+
+cat("Diez primeros productos en el ranking global:",
+    paste(head(ranking_popularidad, 10), collapse = ", "), "\n")
 ```
 
 ```{r fase7-metricas}
-# Función: hit rate@10 y precision@10 para un comprador
-evaluar_comprador <- function(colab, metodo = "item") {
+# Lista de productos por comprador para no consultar el CSV a cada iteración.
+compras_train <- split(pref_train$Material, pref_train$colaborador)
+compras_test <- split(farma_test$Material, farma_test$colaborador)
 
-  # Productos reales comprados en test que NO estaban en train
-  compras_test <- farma_test %>%
-    filter(colaborador == colab) %>%
-    pull(Material) %>% unique()
+compradores_elegibles <- compradores_ambos[vapply(compradores_ambos, function(u) {
+  length(setdiff(unique(compras_test[[u]]), compras_train[[u]])) > 0
+}, logical(1))]
 
-  ya_en_train <- pref_train$Material[pref_train$colaborador == colab]
-  nuevos_test <- setdiff(compras_test, ya_en_train)
-  if(length(nuevos_test) == 0) return(NULL)
+cat("Compradores evaluables:", length(compradores_elegibles), "\n")
+cat("Excluidos por no adquirir productos nuevos:",
+    length(compradores_ambos) - length(compradores_elegibles), "\n")
+stopifnot(length(compradores_elegibles) > 0)
 
-  if(metodo == "item") {
-    # Usar el primer producto comprado en train como semilla
-    semilla <- ya_en_train[1]
-    if(is.null(semilla) || !semilla %in% rownames(sim_train)) return(NULL)
-    recs <- tibble(Material = names(sim_train[semilla,]),
-                   sim = sim_train[semilla,]) %>%
-      filter(Material != semilla, !(Material %in% ya_en_train)) %>%
-      arrange(desc(sim)) %>% head(10) %>% pull(Material)
+# Los mismos compradores y la misma verdad de prueba para los tres métodos.
+evaluar_comprador <- function(colab) {
+  ya_comprados <- compras_train[[colab]]
+  nuevos_test <- setdiff(unique(compras_test[[colab]]), ya_comprados)
+  stopifnot(length(nuevos_test) > 0)
 
-  } else if(metodo == "baseline") {
-    recs <- setdiff(top10_baseline, ya_en_train)[1:10]
-  }
+  # 1. Ítem–ítem: primer código del historial agregado en train como semilla.
+  semilla <- ya_comprados[1]
+  rec_item <- tibble(
+    Material = colnames(sim_train),
+    sim = as.numeric(sim_train[semilla, ])
+  ) %>%
+    filter(!(Material %in% ya_comprados)) %>%
+    arrange(desc(sim)) %>%
+    slice_head(n = 10) %>%
+    pull(Material)
 
-  hit  <- as.integer(any(recs %in% nuevos_test))
-  prec <- mean(recs %in% nuevos_test)
-  tibble(colaborador = colab, hit = hit, precision = prec, metodo = metodo)
+  # 2. Usuario–usuario: los diez vecinos más similares en train, excluido él.
+  similitudes <- sim_usuarios_train[colab, ]
+  orden_vecinos <- order(-similitudes, seq_along(similitudes))
+  vecinos <- names(similitudes)[orden_vecinos]
+  vecinos <- head(vecinos[vecinos != colab], 10)
+  rec_usuario <- pref_train %>%
+    filter(colaborador %in% vecinos, !(Material %in% ya_comprados)) %>%
+    group_by(Material) %>%
+    summarise(n_vecinos = n_distinct(colaborador),
+              log_cant_avg = mean(log_cantidad), .groups = "drop") %>%
+    arrange(desc(n_vecinos), desc(log_cant_avg)) %>%
+    slice_head(n = 10) %>%
+    pull(Material)
+
+  # 3. Más vendidos: filtrar historial ANTES de tomar diez productos.
+  rec_baseline <- head(
+    ranking_popularidad[!(ranking_popularidad %in% ya_comprados)], 10
+  )
+
+  recomendaciones <- list(item = rec_item, usuario = rec_usuario,
+                          baseline = rec_baseline)
+  bind_rows(lapply(names(recomendaciones), function(metodo) {
+    recs <- recomendaciones[[metodo]]
+    n_aciertos <- sum(recs %in% nuevos_test)
+    tibble(colaborador = colab, metodo = metodo,
+           hit = as.integer(n_aciertos > 0),
+           precision = n_aciertos / 10)
+  }))
 }
 
-# Evaluar en muestra de compradores (todos puede tardar mucho)
-set.seed(123)
-muestra_eval <- sample(compradores_ambos, min(200, length(compradores_ambos)))
+resultados_eval <- bind_rows(lapply(compradores_elegibles, evaluar_comprador))
+stopifnot(nrow(resultados_eval) == 3 * length(compradores_elegibles))
+cat("Registros de evaluación (comprador x método):", nrow(resultados_eval), "\n")
+```
 
-resultados_item     <- bind_rows(lapply(muestra_eval, evaluar_comprador, metodo="item"))
-resultados_baseline <- bind_rows(lapply(muestra_eval, evaluar_comprador, metodo="baseline"))
-resultados_eval     <- bind_rows(resultados_item, resultados_baseline)
+La **tasa de acierto (Hit Rate@10)** es la proporción de compradores con al menos
+un producto nuevo entre las recomendaciones. La **precisión@10** es el número
+de coincidencias dividido entre diez, incluso si un método devuelve menos
+sugerencias. Los intervalos de acierto se calculan con **Wilson al 95 %**; los
+de precisión y las diferencias pareadas con **10.000 remuestras bootstrap de
+compradores**, usando semilla 2026.
+
+```{r fase7-intervalos}
+z <- qnorm(0.975)
+resumen_eval <- resultados_eval %>%
+  group_by(metodo) %>%
+  summarise(n = n(), aciertos = sum(hit), hit_rate = mean(hit),
+            precision = mean(precision), .groups = "drop") %>%
+  mutate(
+    # Wilson (no es el intervalo normal de Wald).
+    centro_w = (hit_rate + z^2 / (2*n)) / (1 + z^2/n),
+    margen_w = z * sqrt(hit_rate*(1-hit_rate)/n + z^2/(4*n^2)) /
+      (1 + z^2/n),
+    hit_ic_inf = centro_w - margen_w,
+    hit_ic_sup = centro_w + margen_w
+  )
+
+# Una única matriz de remuestras para conservar el apareamiento por comprador.
+metricas_pareadas <- resultados_eval %>%
+  select(colaborador, metodo, hit, precision) %>%
+  pivot_wider(names_from = metodo, values_from = c(hit, precision))
+metricas_pareadas <- metricas_pareadas[
+  match(compradores_elegibles, metricas_pareadas$colaborador), , drop = FALSE
+]
+stopifnot(!anyNA(metricas_pareadas))
+
+set.seed(2026)
+n_eval <- nrow(metricas_pareadas)
+n_boot <- 10000L
+indices_boot <- replicate(n_boot, sample.int(n_eval, n_eval, replace = TRUE))
+ic_bootstrap <- function(valores) {
+  medias <- colMeans(matrix(valores[indices_boot], nrow = n_eval))
+  unname(quantile(medias, probs = c(0.025, 0.975)))
+}
+
+resumen_eval$prec_ic_inf <- vapply(resumen_eval$metodo, function(m) {
+  ic_bootstrap(metricas_pareadas[[paste0("precision_", m)]])[1]
+}, numeric(1))
+resumen_eval$prec_ic_sup <- vapply(resumen_eval$metodo, function(m) {
+  ic_bootstrap(metricas_pareadas[[paste0("precision_", m)]])[2]
+}, numeric(1))
+
+comparacion_pareada <- bind_rows(lapply(c("item", "usuario"), function(m) {
+  d_hit <- metricas_pareadas[[paste0("hit_", m)]] - metricas_pareadas$hit_baseline
+  d_prec <- metricas_pareadas[[paste0("precision_", m)]] -
+    metricas_pareadas$precision_baseline
+  ci_hit <- ic_bootstrap(d_hit)
+  ci_prec <- ic_bootstrap(d_prec)
+  tibble(metodo = m, diferencia_hit = mean(d_hit),
+         hit_ic_inf = ci_hit[1], hit_ic_sup = ci_hit[2],
+         diferencia_precision = mean(d_prec),
+         prec_ic_inf = ci_prec[1], prec_ic_sup = ci_prec[2])
+}))
 ```
 
 ```{r fase7-tabla}
-# Tabla comparativa con intervalos de confianza (Wilson 95%)
-resumen_eval <- resultados_eval %>%
-  group_by(metodo) %>%
-  summarise(
-    n          = n(),
-    hit_rate   = mean(hit, na.rm=TRUE),
-    precision  = mean(precision, na.rm=TRUE),
-    .groups    = "drop"
-  ) %>%
-  mutate(
-    # Intervalo de confianza para hit rate (proporción)
-    se_hit   = sqrt(hit_rate * (1-hit_rate) / n),
-    ic_inf   = pmax(0, hit_rate - 1.96 * se_hit),
-    ic_sup   = pmin(1, hit_rate + 1.96 * se_hit)
+orden_metodos <- c("item", "usuario", "baseline")
+resumen_eval <- resumen_eval %>%
+  mutate(metodo = factor(metodo, levels = orden_metodos)) %>%
+  arrange(metodo)
+
+resumen_publicable <- resumen_eval %>%
+  transmute(
+    Método = recode(as.character(metodo), item = "Ítem–ítem",
+                    usuario = "Usuario–usuario", baseline = "Más vendidos"),
+    Compradores = n,
+    `Acierto@10` = sprintf("%.2f %%", 100 * hit_rate),
+    `IC 95 % acierto (Wilson)` = sprintf("[%.2f; %.2f] %%",
+                                     100 * hit_ic_inf, 100 * hit_ic_sup),
+    `Precisión@10` = sprintf("%.2f %%", 100 * precision),
+    `IC 95 % precisión (bootstrap)` = sprintf("[%.2f; %.2f] %%",
+                                            100 * prec_ic_inf, 100 * prec_ic_sup)
   )
+knitr::kable(resumen_publicable, caption = "Evaluación temporal sobre todos los compradores elegibles")
 
-print(resumen_eval)
+comparacion_publicable <- comparacion_pareada %>%
+  transmute(
+    Método = recode(metodo, item = "Ítem–ítem", usuario = "Usuario–usuario"),
+    `Diferencia acierto (pp)` = sprintf("%.2f", 100*diferencia_hit),
+    `IC 95 % acierto (pp)` = sprintf("[%.2f; %.2f]",
+                                  100*hit_ic_inf, 100*hit_ic_sup),
+    `Diferencia precisión (pp)` = sprintf("%.3f", 100*diferencia_precision),
+    `IC 95 % precisión (pp)` = sprintf("[%.3f; %.3f]",
+                                    100*prec_ic_inf, 100*prec_ic_sup)
+  )
+knitr::kable(comparacion_publicable,
+             caption = "Diferencias pareadas frente a la línea base de más vendidos")
+```
 
-# Gráfico
+```{r fase7-grafico}
 ggplot(resumen_eval, aes(x = metodo, y = hit_rate,
-                          ymin = ic_inf, ymax = ic_sup, fill = metodo)) +
-  geom_col() + geom_errorbar(width = 0.2) +
-  labs(title = "Hit Rate@10: recomendador vs línea base",
-       y = "Hit Rate@10", x = "") +
+                         ymin = hit_ic_inf, ymax = hit_ic_sup,
+                         fill = metodo)) +
+  geom_col(width = 0.65) +
+  geom_errorbar(width = 0.18) +
+  scale_x_discrete(labels = c(item = "Ítem–ítem",
+                              usuario = "Usuario–usuario",
+                              baseline = "Más vendidos")) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 0.75)) +
+  labs(title = "Acierto@10 por método (2.533 compradores)",
+       subtitle = "Intervalos de confianza de Wilson al 95 %",
+       y = "Acierto@10", x = "") +
   theme_minimal() + theme(legend.position = "none")
 ```
+
+**Interpretación:** bajo esta partición temporal, la línea base de más vendidos
+alcanza el mayor acierto (63,40 %), seguida de usuario–usuario (60,52 %) e
+ítem–ítem (58,47 %). Los resultados no demuestran que la personalización
+supere la popularidad. Se trata de una evaluación comercial de compras futuras,
+no de eficacia o equivalencia terapéutica.
 
 ---
 ```{depuracion de datos}
